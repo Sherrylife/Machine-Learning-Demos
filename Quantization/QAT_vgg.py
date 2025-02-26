@@ -123,7 +123,7 @@ if __name__ == '__main__':
 
     optimizer = torch.optim.SGD(qat_model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
-    train_qat(qat_model, dataloader, optimizer, criterion, iteration=20) # 98 means one epoch
+    train_qat(qat_model, dataloader, optimizer, criterion, iteration=196) # 98 means one epoch
 
     # remove hooks
     for h in hooks:
