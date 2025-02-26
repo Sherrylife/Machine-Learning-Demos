@@ -4,58 +4,78 @@ import copy
 from linear_quantization import *
 from datasets import *
 
-class FakeQuantize(torch.nn.Module):
-    def __init__(self, bitwidth=8):
-        super(FakeQuantize, self).__init__()
-        self.bitwidth = bitwidth
-        self.register_buffer('scale', torch.tensor(1.0))
-        self.register_buffer('zero_point', torch.tensor(0))
+class STE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, method, bitwidth):
+        if method == "per_channel":
+            weight_q, weight_scale, weight_zero_point = linear_quantize_weight_per_channel(x, bitwidth)
+            weight_q_dq = linear_dequantize_weight_per_channel(weight_q, weight_scale, weight_zero_point)
+            return weight_q_dq
+        elif method == "all":
+            scale, zero_point = get_quantization_scale_and_zero_point(x, bitwidth)
+            x_q = linear_quantize(x, bitwidth, scale, zero_point)
+            x_q_dq = linear_dequantize(x_q, bitwidth, scale, zero_point)
+            return x_q_dq
+        else:
+            raise NotImplementedError("Error STE quantization method")
 
-    def forward(self, x):
-        if self.training:
-            # 动态计算 scale 和 zero_point
-            scale, zero_point = get_quantization_scale_and_zero_point(x, self.bitwidth)
-            self.scale.fill_(scale)
-            self.zero_point.fill_(zero_point)
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
 
-        # 使用 Straight-Through Estimator (STE) 进行量化
-        quantized_x = self._fake_quantize(x, self.bitwidth, self.scale.item(), self.zero_point.item())
-        return quantized_x
+# class FakeQuantize(torch.nn.Module):
+#     def __init__(self, bitwidth=8):
+#         super(FakeQuantize, self).__init__()
+#         self.bitwidth = bitwidth
+#         self.register_buffer('scale', torch.tensor(1.0))
+#         self.register_buffer('zero_point', torch.tensor(0))
+#
+#     def forward(self, x):
+#         if self.training:
+#             # 动态计算 scale 和 zero_point
+#             scale, zero_point = get_quantization_scale_and_zero_point(x, self.bitwidth)
+#             self.scale.fill_(scale)
+#             self.zero_point.fill_(zero_point)
+#
+#         # 使用 Straight-Through Estimator (STE) 进行量化
+#         quantized_x = self._fake_quantize(x, self.bitwidth, self.scale.item(), self.zero_point.item())
+#         return quantized_x
+#
+#     def _fake_quantize(self, x, bitwidth, scale, zero_point):
+#         """
+#         Simulate quantization with Straight-Through Estimator (STE).
+#         :param x: [torch.Tensor] input tensor
+#         :param bitwidth: [int] quantization bit width
+#         :param scale: [float] scaling factor
+#         :param zero_point: [int] zero point
+#         :return: [torch.Tensor] fake-quantized tensor
+#         """
+#         # Step 1: Scale the input
+#         scaled_x = x / scale
+#
+#         # Step 2: Round the floating value to integer value
+#         rounded_x = torch.round(scaled_x)
+#
+#         # Step 3: Shift the rounded value to make zero_point 0
+#         shifted_x = rounded_x + zero_point
+#
+#         # Step 4: Clamp the shifted value to lie in bitwidth-bit range
+#         quantized_min, quantized_max = get_quantized_range(bitwidth)
+#         clamped_x = shifted_x.clamp(quantized_min, quantized_max)
+#
+#         # Step 5: Dequantize back to floating-point for continued training
+#         dequantized_x = (clamped_x - zero_point) * scale
+#
+#         # Use STE to bypass gradient computation for quantization
+#         return x + (dequantized_x - x).detach()
 
-    def _fake_quantize(self, x, bitwidth, scale, zero_point):
-        """
-        Simulate quantization with Straight-Through Estimator (STE).
-        :param x: [torch.Tensor] input tensor
-        :param bitwidth: [int] quantization bit width
-        :param scale: [float] scaling factor
-        :param zero_point: [int] zero point
-        :return: [torch.Tensor] fake-quantized tensor
-        """
-        # Step 1: Scale the input
-        scaled_x = x / scale
-
-        # Step 2: Round the floating value to integer value
-        rounded_x = torch.round(scaled_x)
-
-        # Step 3: Shift the rounded value to make zero_point 0
-        shifted_x = rounded_x + zero_point
-
-        # Step 4: Clamp the shifted value to lie in bitwidth-bit range
-        quantized_min, quantized_max = get_quantized_range(bitwidth)
-        clamped_x = shifted_x.clamp(quantized_min, quantized_max)
-
-        # Step 5: Dequantize back to floating-point for continued training
-        dequantized_x = (clamped_x - zero_point) * scale
-
-        # Use STE to bypass gradient computation for quantization
-        return x + (dequantized_x - x).detach()
 
 class QuantizedConv2d(nn.Module):
     def __init__(self, weight, bias,
                  input_zero_point, output_zero_point,
                  input_scale, weight_scale, output_scale,
                  stride, padding, dilation, groups,
-                 feature_bitwidth=8, weight_bitwidth=8):
+                 feature_bitwidth=8, weight_bitwidth=8, qat_training=False):
         super().__init__()
         # current version Pytorch does not support IntTensor as nn.Parameter
         self.register_buffer('weight', weight)
@@ -75,22 +95,32 @@ class QuantizedConv2d(nn.Module):
 
         self.feature_bitwidth = feature_bitwidth
         self.weight_bitwidth = weight_bitwidth
+        self.qat_training = qat_training
+
 
 
     def forward(self, x):
-        return quantized_conv2d(
-            x, self.weight, self.bias,
-            self.feature_bitwidth, self.weight_bitwidth,
-            self.input_zero_point, self.output_zero_point,
-            self.input_scale, self.weight_scale, self.output_scale,
-            self.stride, self.padding, self.dilation, self.groups
-            )
+        if self.qat_training:
+            # qat training
+            weight_q, weight_scale, weight_zero_point = linear_quantize_weight_per_channel(self.weight,self.weight_bitwidth)
+            weight_q_dq = linear_dequantize_weight_per_channel(weight_q, weight_scale, weight_zero_point)
+            self.weight = weight_q_dq
+            return torch.nn.functional.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+
+        else:  # integer-only inference
+            return quantized_conv2d(
+                x, self.weight, self.bias,
+                self.feature_bitwidth, self.weight_bitwidth,
+                self.input_zero_point, self.output_zero_point,
+                self.input_scale, self.weight_scale, self.output_scale,
+                self.stride, self.padding, self.dilation, self.groups
+                )
 
 class QuantizedLinear(nn.Module):
     def __init__(self, weight, bias,
                  input_zero_point, output_zero_point,
                  input_scale, weight_scale, output_scale,
-                 feature_bitwidth=8, weight_bitwidth=8):
+                 feature_bitwidth=8, weight_bitwidth=8, qat_training=False):
         super().__init__()
         # current version Pytorch does not support IntTensor as nn.Parameter
         self.register_buffer('weight', weight)
@@ -105,8 +135,17 @@ class QuantizedLinear(nn.Module):
 
         self.feature_bitwidth = feature_bitwidth
         self.weight_bitwidth = weight_bitwidth
+        self.qat_training = qat_training
 
     def forward(self, x):
+        if self.qat_training:
+            # qat training
+            weight_q, weight_scale, weight_zero_point = linear_quantize_weight_per_channel(self.weight,self.weight_bitwidth)
+            weight_q_dq = linear_dequantize_weight_per_channel(weight_q, weight_scale, weight_zero_point)
+            self.weight = weight_q_dq
+            return torch.nn.functional.linear(x, self.weight, self.bias)
+
+
         return quantized_linear(
             x, self.weight, self.bias,
             self.feature_bitwidth, self.weight_bitwidth,
@@ -186,6 +225,31 @@ def linear_quantize_weight_per_channel(tensor, bitwidth):
     return quantized_tensor, scale, 0
 
 
+def linear_dequantize_weight_per_channel(quantized_tensor, scale, zero_point=0, bitwidth=None):
+    """
+    Linear dequantization for weight tensor quantized per channel.
+
+    :param quantized_tensor: [torch.(cuda.)Tensor] quantized weight tensor (integer values)
+    :param scale: [torch.(cuda.)Tensor] scaling factor for each output channel
+    :param zero_point: [int] zero point used during quantization (default is 0)
+    :param bitwidth: [int] quantization bit width (optional, for validation)
+    :return:
+        [torch.(cuda.)Tensor] dequantized floating-point tensor
+    """
+    # Ensure the input tensor is of integer type
+    assert quantized_tensor.dtype in [torch.int8, torch.int16, torch.int32], \
+        "quantized_tensor must be of integer type"
+    # Validate scale dimensions
+    dim_output_channels = 0
+    num_output_channels = quantized_tensor.shape[dim_output_channels]
+    assert scale.shape[0] == num_output_channels, "Scale tensor must match the number of output channels"
+    shifted_tensor = quantized_tensor - zero_point
+    fp_tensor = shifted_tensor.to(torch.float) * scale
+
+    return fp_tensor
+
+
+
 def linear_quantize_bias_per_output_channel(bias, weight_scale, input_scale):
     """
     linear quantization for single bias tensor
@@ -212,6 +276,36 @@ def linear_quantize_bias_per_output_channel(bias, weight_scale, input_scale):
     quantized_bias = linear_quantize(bias, 32, bias_scale,
                                      zero_point=0, dtype=torch.int32)
     return quantized_bias, bias_scale, 0
+
+
+def linear_dequantize_bias_per_output_channel(quantized_bias, bias_scale, zero_point=0):
+    """
+    Linear dequantization for single bias tensor.
+
+    :param quantized_bias: [torch.IntTensor] quantized bias tensor (integer values)
+    :param bias_scale: [float or torch.FloatTensor] bias scale tensor
+    :param zero_point: [int] zero point used during quantization (default is 0)
+    :return:
+        [torch.FloatTensor] dequantized floating-point bias tensor
+    """
+    # Ensure the input tensor is of integer type
+    assert quantized_bias.dtype == torch.int32, \
+        "quantized_bias must be of type torch.int32"
+    # Validate bias_scale type and shape
+    if isinstance(bias_scale, torch.Tensor):
+        assert bias_scale.dtype == torch.float, "bias_scale must be of type torch.float"
+        bias_scale = bias_scale.view(-1)  # Ensure it's a 1D tensor
+        assert quantized_bias.numel() == bias_scale.numel(), \
+            "bias_scale must match the number of elements in quantized_bias"
+    # Step 1: Shift the quantized_bias back by subtracting zero_point
+    shifted_bias = quantized_bias - zero_point
+    # Step 2: Scale the shifted_bias using the bias_scale
+    fp_bias = shifted_bias.to(torch.float) * bias_scale
+
+    return fp_bias
+
+
+
 
 def shift_quantized_linear_bias(quantized_bias, quantized_weight, input_zero_point):
     """

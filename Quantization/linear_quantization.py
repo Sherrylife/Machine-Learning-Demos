@@ -1,5 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 
 def get_quantization_scale_and_zero_point(fp_tensor, bitwidth):
     """
@@ -74,6 +75,27 @@ def linear_quantize(fp_tensor, bitwidth, scale, zero_point, dtype=torch.int8) ->
     quantized_min, quantized_max = get_quantized_range(bitwidth)
     quantized_tensor = shifted_tensor.clamp_(quantized_min, quantized_max)
     return quantized_tensor
+
+def linear_dequantize(quantized_tensor, bitwidth, scale, zero_point):
+    """
+    Linear dequantization for single quantized tensor.
+    :param quantized_tensor: [torch.(cuda.)Tensor] quantized tensor (e.g., torch.int8)
+    :param bitwidth: [int] quantization bit width
+    :param scale: [torch.(cuda.)FloatTensor] scaling factor
+    :param zero_point: [torch.(cuda.)IntTensor] the desired centroid of tensor values
+    :return: [torch.(cuda.)FloatTensor] floating-point tensor
+    """
+    assert quantized_tensor.dtype in [torch.int8, torch.int32], "Input tensor must be quantized (e.g., int8 or int32)"
+    assert isinstance(scale, float) or (scale.dtype == torch.float and scale.dim() == quantized_tensor.dim())
+    assert isinstance(zero_point, int) or (zero_point.dtype == quantized_tensor.dtype and zero_point.dim() == quantized_tensor.dim())
+
+    # Step 1: Shift the quantized tensor to remove zero_point
+    shifted_tensor = quantized_tensor - zero_point
+    # Step 2: Scale the shifted tensor back to floating-point range
+    fp_tensor = shifted_tensor.float() * scale
+
+    return fp_tensor
+
 
 def test_linear_quantize(
     test_tensor=torch.tensor([

@@ -72,11 +72,10 @@ def get_quantization_scale_and_zero_point(fp_tensor, bitwidth):
 # 测试 FakeQuantize 的反向传播
 if __name__ == "__main__":
     # 创建一个简单的模型
-    torch.manual_seed(0)
     class SimpleModel(nn.Module):
         def __init__(self):
             super(SimpleModel, self).__init__()
-            self.fc = nn.Linear(2, 3, bias=False)
+            self.fc = nn.Linear(10, 10)
             self.fake_quant = FakeQuantize(bitwidth=8)
 
         def forward(self, x):
@@ -90,16 +89,12 @@ if __name__ == "__main__":
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
     # 输入数据和目标值
-    inputs = torch.randn(1, 2, requires_grad=True)  # 需要梯度的输入
-    # targets = torch.randn(1, 3)
-    targets = torch.tensor([1,2,3])
+    inputs = torch.randn(5, 10, requires_grad=True)  # 需要梯度的输入
+    targets = torch.randn(5, 10)
 
     # 前向传播
-    print("model", list(model.parameters()))
-    print("input", inputs)
     outputs = model(inputs)
-    print("output", outputs)
-    loss = torch.mean(outputs)
+    loss = criterion(outputs, targets)
 
     # 反向传播
     optimizer.zero_grad()

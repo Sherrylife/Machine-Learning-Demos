@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import torch.nn as nn
 import copy
@@ -24,6 +24,9 @@ torch.manual_seed(seed)
 
 def add_range_recoder_hook(model):
     import functools
+    # add hook to record the min max value of the activation
+    input_activation = {}
+    output_activation = {}
     def _record_range(self, x, y, module_name):
         x = x[0]
         input_activation[module_name] = x.detach()
@@ -34,7 +37,8 @@ def add_range_recoder_hook(model):
         if isinstance(m, (nn.Conv2d, nn.Linear, nn.ReLU)):
             all_hooks.append(m.register_forward_hook(
                 functools.partial(_record_range, module_name=name)))
-    return all_hooks
+    return all_hooks, input_activation, output_activation
+
 
 
 if __name__ == '__main__':
@@ -64,11 +68,8 @@ if __name__ == '__main__':
     so that we can get the range of the feature maps and compute their corresponding 
     scaling factors and zero points.
     """
-    # add hook to record the min max value of the activation
-    input_activation = {}
-    output_activation = {}
 
-    hooks = add_range_recoder_hook(model_fused)
+    hooks, input_activation, output_activation = add_range_recoder_hook(model_fused)
     sample_data = iter(dataloader['train']).__next__()[0]
     model_fused(sample_data.cuda())
 

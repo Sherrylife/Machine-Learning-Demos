@@ -1,12 +1,11 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import torch.nn as nn
 import copy
 
-from tqdm.auto import tqdm
-from datasets import *
 from quantize_layer import *
+from datasets import *
 import numpy as np
 import random
 from vgg import VGG
@@ -22,57 +21,34 @@ random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 
-
 class QuantizationAwareVGG(nn.Module):
     def __init__(self, original_model, feature_bitwidth=8, weight_bitwidth=8):
         super(QuantizationAwareVGG, self).__init__()
         self.feature_bitwidth = feature_bitwidth
         self.weight_bitwidth = weight_bitwidth
-
-        # 将原始模型的 backbone 转换为支持 QAT 的结构
-        quantized_backbone = []
-        for layer in original_model.backbone:
-            if isinstance(layer, nn.Conv2d):
-                quantized_backbone.append(layer)
-                quantized_backbone.append(FakeQuantize(feature_bitwidth))
-            elif isinstance(layer, nn.ReLU):
-                quantized_backbone.append(layer)
-            elif isinstance(layer, nn.MaxPool2d):
-                quantized_backbone.append(layer)
-            elif isinstance(layer, nn.AvgPool2d):
-                quantized_backbone.append(layer)
-            elif isinstance(layer, nn.BatchNorm2d):
-                quantized_backbone.append(layer)
-            else:
-                raise NotImplementedError(f"Unsupported layer type: {type(layer)}")
-
-        self.backbone = nn.Sequential(*quantized_backbone)
-
-        # 对分类器部分也进行类似的处理
-        quantized_classifier = [original_model.classifier, FakeQuantize(weight_bitwidth)]
-        # for layer in original_model.classifier:
-        #     if isinstance(layer, nn.Linear):
-        #         quantized_classifier.append(layer)
-        #         quantized_classifier.append(FakeQuantize(feature_bitwidth))
-        #     elif isinstance(layer, nn.ReLU):
-        #         quantized_classifier.append(layer)
-        #     else:
-        #         raise NotImplementedError(f"Unsupported layer type: {type(layer)}")
-
-        self.classifier = nn.Sequential(*quantized_classifier)
+        self.backbone = original_model.backbone
+        self.classifier = original_model.classifier
 
     def forward(self, x):
-        x = self.backbone(x)
+        for layer in self.backbone:
+            if isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Linear):
+                x = STE.apply(x, "per_channel", self.weight_bitwidth)
+            elif isinstance(layer, nn.ReLU):
+                x = STE.apply(x, "all", self.feature_bitwidth)
+            x = layer(x)
+
         x = x.view(x.size(0), -1)  # Flatten
         x = self.classifier(x)
         return x
 
 
-def train_qat(model, dataloader, optimizer, criterion, epochs=10):
+def train_qat(model, dataloader, optimizer, criterion, iteration=100):
     model.train()
-    for epoch in range(epochs):
+    epoch, idx = 0, 0
+    while(idx < iteration):
         running_loss = 0.0
-        for inputs, targets in tqdm(dataloader['train'], desc=f"Epoch {epoch + 1}/{epochs}"):
+        inner_batch = 0
+        for inputs, targets in tqdm(dataloader['train'], desc=f"Iteration {idx + 1}/{iteration}"):
             inputs, targets = inputs.cuda(), targets.cuda()
 
             optimizer.zero_grad()
@@ -82,111 +58,35 @@ def train_qat(model, dataloader, optimizer, criterion, epochs=10):
             optimizer.step()
 
             running_loss += loss.item()
+            idx += 1
+            inner_batch += 1
+            if idx >= iteration:
+                break
+        print(f"Epoch {epoch + 1}, Loss: {running_loss / inner_batch:.4f}")
 
-        print(f"Epoch {epoch + 1}, Loss: {running_loss / len(dataloader['train']):.4f}")
-
-        # 每个 epoch 结束后评估模型性能
-        model.eval()
-        accuracy = evaluate(model, dataloader['test'])
-        print(f"Test Accuracy after epoch {epoch + 1}: {accuracy:.2f}%")
-        model.train()
-
-def extract_quantization_params(module):
-    """
-    Extract quantization parameters (scale and zero_point) from a module.
-    :param module: [torch.nn.Module] the module to extract parameters from
-    :return:
-        A dictionary containing input_scale, input_zero_point, weight_scale, and weight_zero_point
-    """
-    if hasattr(module, 'weight_fake_quant'):
-        # Extract weight scale and zero_point from FakeQuantize module
-        weight_scale = module.weight_fake_quant.scale
-        weight_zero_point = module.weight_fake_quant.zero_point
-    else:
-        weight_scale, weight_zero_point = None, None
-
-    if hasattr(module, 'activation_post_process'):
-        # Extract input scale and zero_point from activation_post_process
-        input_scale = module.activation_post_process.scale
-        input_zero_point = module.activation_post_process.zero_point
-    else:
-        input_scale, input_zero_point = None, None
-
-    return {
-        'input_scale': input_scale,
-        'input_zero_point': input_zero_point,
-        'weight_scale': weight_scale,
-        'weight_zero_point': weight_zero_point
-    }
+    model.eval()
+    accuracy = evaluate(model, dataloader['test'])
+    print(f"Test Accuracy after iteration {idx + 1}: {accuracy:.2f}%")
+    model.train()
 
 
-def build_custom_quantized_model(qat_model, feature_bitwidth=8, weight_bitwidth=8):
-    quantized_backbone = []
-    ptr = 0
-    while ptr < len(qat_model.backbone):
-        layer = qat_model.backbone[ptr]
-        if isinstance(layer, nn.Conv2d):
-            params = extract_quantization_params(layer)
-            quantized_weight, weight_scale, weight_zero_point = linear_quantize_weight_per_channel(
-                layer.weight.data, weight_bitwidth
-            )
-            quantized_bias, bias_scale, bias_zero_point = linear_quantize_bias_per_output_channel(
-                layer.bias.data, params['weight_scale'], params['input_scale']
-            )
-            shifted_quantized_bias = shift_quantized_conv2d_bias(
-                quantized_bias, quantized_weight, params['input_zero_point']
-            )
+def add_range_recoder_hook(model):
+    import functools
+    # add hook to record the min max value of the activation
+    input_activation = {}
+    output_activation = {}
+    def _record_range(self, x, y, module_name):
+        x = x[0]
+        input_activation[module_name] = x.detach()
+        output_activation[module_name] = y.detach()
 
-            quantized_conv = QuantizedConv2d(
-                quantized_weight, shifted_quantized_bias,
-                params['input_zero_point'], params['output_zero_point'],
-                params['input_scale'], weight_scale, params['output_scale'],
-                layer.stride, layer.padding, layer.dilation, layer.groups,
-                feature_bitwidth=feature_bitwidth, weight_bitwidth=weight_bitwidth
-            )
-            quantized_backbone.append(quantized_conv)
-            ptr += 1
-        elif isinstance(layer, nn.ReLU):
-            quantized_backbone.append(layer)
-            ptr += 1
-        elif isinstance(layer, nn.MaxPool2d):
-            quantized_backbone.append(QuantizedMaxPool2d(
-                kernel_size=layer.kernel_size, stride=layer.stride
-            ))
-            ptr += 1
-        elif isinstance(layer, nn.AvgPool2d):
-            quantized_backbone.append(QuantizedAvgPool2d(
-                kernel_size=layer.kernel_size, stride=layer.stride
-            ))
-            ptr += 1
-        else:
-            raise NotImplementedError(type(layer))
+    all_hooks = []
+    for name, m in model.named_modules():
+        if isinstance(m, (nn.Conv2d, nn.Linear, nn.ReLU)):
+            all_hooks.append(m.register_forward_hook(
+                functools.partial(_record_range, module_name=name)))
+    return all_hooks, input_activation, output_activation
 
-    # 处理分类器部分
-    fc_layer = qat_model.classifier
-    params = extract_quantization_params(fc_layer)
-    quantized_weight, weight_scale, weight_zero_point = linear_quantize_weight_per_channel(
-        fc_layer.weight.data, weight_bitwidth
-    )
-    quantized_bias, bias_scale, bias_zero_point = linear_quantize_bias_per_output_channel(
-        fc_layer.bias.data, params['weight_scale'], params['input_scale']
-    )
-    shifted_quantized_bias = shift_quantized_linear_bias(
-        quantized_bias, quantized_weight, params['input_zero_point']
-    )
-
-    quantized_classifier = QuantizedLinear(
-        quantized_weight, shifted_quantized_bias,
-        params['input_zero_point'], params['output_zero_point'],
-        params['input_scale'], weight_scale, params['output_scale'],
-        feature_bitwidth=feature_bitwidth, weight_bitwidth=weight_bitwidth
-    )
-
-    # 构建最终的量化模型
-    quantized_model = copy.deepcopy(qat_model)
-    quantized_model.backbone = nn.Sequential(*quantized_backbone)
-    quantized_model.classifier = quantized_classifier
-    return quantized_model
 
 
 if __name__ == '__main__':
@@ -211,25 +111,120 @@ if __name__ == '__main__':
     # test the fuse_conv_bn function
     model_fused = test_fuse_conv_bn(model, dataloader)
 
-    # Build QAT model
+    """
+    We will fine-tune the model by injecting the quantization error in the training process, 
+    during the process we will also record the range of the feature maps and compute their 
+    corresponding scaling factors and zero points.
+    """
+
     qat_model = QuantizationAwareVGG(model_fused).cuda()
 
-    # Train QAT model
-    optimizer = torch.optim.Adam(qat_model.parameters(), lr=1e-4)
+    hooks, input_activation, output_activation = add_range_recoder_hook(qat_model)
+
+    optimizer = torch.optim.SGD(qat_model.parameters(), lr=1e-3, momentum=0.9, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
-    train_qat(qat_model, dataloader, optimizer, criterion, epochs=3)
+    train_qat(qat_model, dataloader, optimizer, criterion, iteration=20) # 98 means one epoch
 
-    # Build custom quantized model
-    custom_quantized_model = build_custom_quantized_model(qat_model)
+    # remove hooks
+    for h in hooks:
+        h.remove()
 
-    # Evaluate quantized model
-    quantized_model_accuracy = evaluate(
-        custom_quantized_model, dataloader['test'],
-        extra_preprocess=[lambda x: extra_preprocess(x, bitwidth=8)]
-    )
-    print(f"Quantized model accuracy: {quantized_model_accuracy:.2f}%")
+    """
+    3. Finally, let's do model quantization. We will convert the model in the following mapping
+    nn.Conv2d: QuantizedConv2d, nn.Linear: QuantizedLinear,
+    # the following twos are just wrappers, as current torch modules do not support int8 data format;
+    # we will temporarily convert them to fp32 for computation
+    nn.MaxPool2d: QuantizedMaxPool2d, nn.AvgPool2d: QuantizedAvgPool2d,
+    """
+    # we use int8 quantization, which is quite popular
+    for bitwidth in [8, 7, 6, 5, 4, 3, 2]:
+        feature_bitwidth = weight_bitwidth = bitwidth
+        quantized_model = copy.deepcopy(qat_model)
+        quantized_backbone = []
+        ptr = 0
+        while ptr < len(quantized_model.backbone):
+            if isinstance(quantized_model.backbone[ptr], nn.Conv2d) and \
+                    isinstance(quantized_model.backbone[ptr + 1], nn.ReLU):
+                conv = quantized_model.backbone[ptr]
+                conv_name = f'backbone.{ptr}'
+                relu = quantized_model.backbone[ptr + 1]
+                relu_name = f'backbone.{ptr + 1}'
 
+                input_scale, input_zero_point = \
+                    get_quantization_scale_and_zero_point(
+                        input_activation[conv_name], feature_bitwidth)
 
+                output_scale, output_zero_point = \
+                    get_quantization_scale_and_zero_point(
+                        output_activation[relu_name], feature_bitwidth)
+
+                quantized_weight, weight_scale, weight_zero_point = \
+                    linear_quantize_weight_per_channel(conv.weight.data, weight_bitwidth)
+                quantized_bias, bias_scale, bias_zero_point = \
+                    linear_quantize_bias_per_output_channel(
+                        conv.bias.data, weight_scale, input_scale)
+                shifted_quantized_bias = \
+                    shift_quantized_conv2d_bias(quantized_bias, quantized_weight,
+                                                input_zero_point)
+
+                quantized_conv = QuantizedConv2d(
+                    quantized_weight, shifted_quantized_bias,
+                    input_zero_point, output_zero_point,
+                    input_scale, weight_scale, output_scale,
+                    conv.stride, conv.padding, conv.dilation, conv.groups,
+                    feature_bitwidth=feature_bitwidth, weight_bitwidth=weight_bitwidth
+                )
+
+                quantized_backbone.append(quantized_conv)
+                ptr += 2
+            elif isinstance(quantized_model.backbone[ptr], nn.MaxPool2d):
+                quantized_backbone.append(QuantizedMaxPool2d(
+                    kernel_size=quantized_model.backbone[ptr].kernel_size,
+                    stride=quantized_model.backbone[ptr].stride
+                ))
+                ptr += 1
+            elif isinstance(quantized_model.backbone[ptr], nn.AvgPool2d):
+                quantized_backbone.append(QuantizedAvgPool2d(
+                    kernel_size=quantized_model.backbone[ptr].kernel_size,
+                    stride=quantized_model.backbone[ptr].stride
+                ))
+                ptr += 1
+            else:
+                raise NotImplementedError(type(quantized_model.backbone[ptr]))  # should not happen
+        quantized_model.backbone = nn.Sequential(*quantized_backbone)
+
+        # finally, quantized the classifier
+        fc_name = 'classifier'
+        fc = model.classifier
+        input_scale, input_zero_point = \
+            get_quantization_scale_and_zero_point(
+                input_activation[fc_name], feature_bitwidth)
+
+        output_scale, output_zero_point = \
+            get_quantization_scale_and_zero_point(
+                output_activation[fc_name], feature_bitwidth)
+
+        quantized_weight, weight_scale, weight_zero_point = \
+            linear_quantize_weight_per_channel(fc.weight.data, weight_bitwidth)
+        quantized_bias, bias_scale, bias_zero_point = \
+            linear_quantize_bias_per_output_channel(
+                fc.bias.data, weight_scale, input_scale)
+        shifted_quantized_bias = \
+            shift_quantized_linear_bias(quantized_bias, quantized_weight,
+                                        input_zero_point)
+
+        quantized_model.classifier = QuantizedLinear(
+            quantized_weight, shifted_quantized_bias,
+            input_zero_point, output_zero_point,
+            input_scale, weight_scale, output_scale,
+            feature_bitwidth=feature_bitwidth, weight_bitwidth=weight_bitwidth
+        )
+
+        # print(quantized_model)
+
+        model_accuracy = evaluate(quantized_model, dataloader['test'],
+                                       extra_preprocess=[extra_preprocess])
+        print(f"int{bitwidth} model has accuracy={model_accuracy:.2f}%")
 
 
 
