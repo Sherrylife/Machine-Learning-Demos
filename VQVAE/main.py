@@ -1,5 +1,6 @@
 import argparse
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import time
 
 import cv2
@@ -9,10 +10,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dldemos.VQVAE.configs import get_cfg
-from dldemos.VQVAE.dataset import get_dataloader
-from dldemos.VQVAE.model import VQVAE
-from dldemos.VQVAE.pixelcnn_model import PixelCNNWithEmbedding
+from configs import get_cfg
+from dataset import get_dataloader
+from model import VQVAE
+from pixelcnn_model import PixelCNNWithEmbedding
 
 USE_LMDB = False
 
@@ -20,7 +21,7 @@ USE_LMDB = False
 def train_vqvae(model: VQVAE,
                 img_shape=None,
                 device='cuda',
-                ckpt_path='dldemos/VQVAE/model.pth',
+                ckpt_path='VQVAE/model.pth',
                 batch_size=64,
                 dataset_type='MNIST',
                 lr=1e-3,
@@ -65,7 +66,7 @@ def train_generative_model(vqvae: VQVAE,
                            model,
                            img_shape=None,
                            device='cuda',
-                           ckpt_path='dldemos/VQVAE/gen_model.pth',
+                           ckpt_path='VQVAE/gen_model.pth',
                            dataset_type='MNIST',
                            batch_size=64,
                            n_epochs=50):

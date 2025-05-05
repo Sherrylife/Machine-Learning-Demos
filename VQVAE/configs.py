@@ -12,8 +12,8 @@ mnist_cfg1 = dict(dataset_type='MNIST',
                   pixelcnn_n_blocks=15,
                   pixelcnn_dim=128,
                   pixelcnn_linear_dim=32,
-                  vqvae_path='dldemos/VQVAE/model_mnist.pth',
-                  gen_model_path='dldemos/VQVAE/gen_model_mnist.pth')
+                  vqvae_path='./model_mnist.pth',
+                  gen_model_path='./gen_model_mnist.pth')
 
 celebahq_cfg1 = dict(dataset_type='CelebAHQ',
                      img_shape=(3, 128, 128),
@@ -29,8 +29,8 @@ celebahq_cfg1 = dict(dataset_type='CelebAHQ',
                      pixelcnn_n_blocks=15,
                      pixelcnn_dim=384,
                      pixelcnn_linear_dim=256,
-                     vqvae_path='dldemos/VQVAE/model_celebahq_1.pth',
-                     gen_model_path='dldemos/VQVAE/gen_model_celebahq_1.pth')
+                     vqvae_path='./model_celebahq_1.pth',
+                     gen_model_path='./gen_model_celebahq_1.pth')
 
 celebahq_cfg2 = dict(dataset_type='CelebAHQ',
                      img_shape=(3, 128, 128),
@@ -46,8 +46,8 @@ celebahq_cfg2 = dict(dataset_type='CelebAHQ',
                      pixelcnn_n_blocks=15,
                      pixelcnn_dim=384,
                      pixelcnn_linear_dim=256,
-                     vqvae_path='dldemos/VQVAE/model_celebahq_2.pth',
-                     gen_model_path='dldemos/VQVAE/gen_model_celebahq_2.pth')
+                     vqvae_path='./model_celebahq_2.pth',
+                     gen_model_path='./gen_model_celebahq_2.pth')
 
 celebahq_cfg3 = dict(dataset_type='CelebAHQ',
                      img_shape=(3, 64, 64),
@@ -63,8 +63,8 @@ celebahq_cfg3 = dict(dataset_type='CelebAHQ',
                      pixelcnn_n_blocks=15,
                      pixelcnn_dim=384,
                      pixelcnn_linear_dim=256,
-                     vqvae_path='dldemos/VQVAE/model_celebahq_3.pth',
-                     gen_model_path='dldemos/VQVAE/gen_model_celebahq_3.pth')
+                     vqvae_path='./model_celebahq_3.pth',
+                     gen_model_path='./gen_model_celebahq_3.pth')
 
 celebahq_cfg4 = dict(dataset_type='CelebAHQ',
                      img_shape=(3, 64, 64),
@@ -80,8 +80,8 @@ celebahq_cfg4 = dict(dataset_type='CelebAHQ',
                      pixelcnn_n_blocks=15,
                      pixelcnn_dim=384,
                      pixelcnn_linear_dim=256,
-                     vqvae_path='dldemos/VQVAE/model_celebahq_4.pth',
-                     gen_model_path='dldemos/VQVAE/gen_model_celebahq_4.pth')
+                     vqvae_path='./model_celebahq_4.pth',
+                     gen_model_path='./gen_model_celebahq_4.pth')
 
 cfgs = [mnist_cfg1, celebahq_cfg1, celebahq_cfg2, celebahq_cfg3, celebahq_cfg4]
 
